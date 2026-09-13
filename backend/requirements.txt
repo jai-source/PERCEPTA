@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+websockets
+opencv-python
+numpy
+ultralytics
+torch
+torchvision
+pyautogui
+pydantic
+pydantic-settings
+python-multipart
+aiofiles
+pillow
+python-dotenv
+screeninfo
+requests

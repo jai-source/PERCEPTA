@@ -1,0 +1,45 @@
+{
+  "version": "1.0.0",
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8000,
+    "cors_origins": ["http://localhost:5173", "http://localhost:4173", "http://127.0.0.1:5173"],
+    "log_level": "INFO"
+  },
+  "models": {
+    "pose_model": "yolov8n-pose.pt",
+    "face_model": "yolov8n-face.pt",
+    "hand_model": "yolov8n-hand.pt",
+    "fallback_model": "yolov8n.pt",
+    "device": "auto",
+    "target_fps": 20,
+    "jpeg_quality": 75
+  },
+  "head_tracking": {
+    "K_HEAD": 3.0,
+    "DEAD_ZONE": 4.0,
+    "ALPHA": 0.35,
+    "SMOOTH_WINDOW": 5
+  },
+  "face_gestures": {
+    "EYEBROW_THRESHOLD": 0.22,
+    "CLICK_COOLDOWN": 0.8,
+    "BLINK_THRESHOLD": 0.21,
+    "BLINK_CONSECUTIVE_FRAMES": 3
+  },
+  "hand_gestures": {
+    "GESTURE_CONFIDENCE_THRESHOLD": 0.65,
+    "GESTURE_CONFIRMATION_FRAMES": 3,
+    "GESTURE_COOLDOWN": 0.5,
+    "SWIPE_MIN_VELOCITY": 30.0,
+    "SWIPE_MIN_FRAMES": 5
+  },
+  "voice": {
+    "VOICE_CONFIDENCE_THRESHOLD": 0.8
+  },
+  "interaction": {
+    "mode": "windows",
+    "cursor_smoothing": true,
+    "failsafe": false
+  }
+}

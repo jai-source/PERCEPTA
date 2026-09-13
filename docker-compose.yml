@@ -1,0 +1,41 @@
+version: '3.9'
+
+services:
+  percepta-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: percepta-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models:ro
+      - ./backend/calibration/profiles:/app/calibration/profiles
+    environment:
+      - PERCEPTA_HOST=0.0.0.0
+      - PERCEPTA_PORT=8000
+      - PERCEPTA_DEVICE=cpu
+      - PERCEPTA_INTERACTION_MODE=browser
+      - PERCEPTA_CORS_ORIGINS=["http://localhost:5173","http://localhost:80"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  percepta-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: percepta-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      percepta-backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  default:
+    name: percepta-network
