@@ -1,0 +1,245 @@
+diff --git a/backend/api/websocket.py b/backend/api/websocket.py
+index ad00810..6521f6a 100644
+--- a/backend/api/websocket.py
++++ b/backend/api/websocket.py
+@@ -13,9 +13,11 @@ from typing import List
+ try:
+     from perception.frame_processor import FrameProcessor
+     from gestures.voice.voice_processor import VoiceProcessor
++    from config import config
+ except ImportError:
+     from ..perception.frame_processor import FrameProcessor
+     from ..gestures.voice.voice_processor import VoiceProcessor
++    from ..config import config
+ 
+ router = APIRouter()
+ 
+@@ -124,6 +126,21 @@ async def websocket_endpoint(websocket: WebSocket):
+                 active_processor.update_modalities(bool(message.get("face_enabled", True)), bool(message.get("hand_enabled", True)), bool(message.get("voice_enabled", True)))
+                 await websocket.send_json({"type": "ack", "request": kind})
+             elif kind in {"settings", "calibration"}:
+-                await websocket.send_json({"type": "ack", "request": kind})
++                if kind == "settings":
++                    applied = {}
++                    for key, value in message.items():
++                        if key == "type":
++                            continue
++                        attr = key.lower()
++                        if hasattr(config, attr) and isinstance(getattr(config, attr), (int, float)):
++                            try:
++                                cast = type(getattr(config, attr))
++                                setattr(config, attr, cast(value))
++                                applied[key] = getattr(config, attr)
++                            except (TypeError, ValueError):
++                                continue
++                    await websocket.send_json({"type": "ack", "request": kind, "applied": applied})
++                else:
++                    await websocket.send_json({"type": "ack", "request": kind})
+     except WebSocketDisconnect:
+         manager.disconnect(websocket)
+diff --git a/backend/events/event_types.py b/backend/events/event_types.py
+index 302e9d4..542604b 100644
+--- a/backend/events/event_types.py
++++ b/backend/events/event_types.py
+@@ -36,6 +36,7 @@ class EventType(str, Enum):
+     HAND_FIST = "HAND_FIST"
+     HAND_POINT = "HAND_POINT"
+     HAND_PINCH = "HAND_PINCH"
++    HAND_TWO_FINGERS = "HAND_TWO_FINGERS"
+     THUMB_UP = "THUMB_UP"
+     THUMB_DOWN = "THUMB_DOWN"
+ 
+diff --git a/backend/perception/frame_processor.py b/backend/perception/frame_processor.py
+index 072a824..0e0e62f 100644
+--- a/backend/perception/frame_processor.py
++++ b/backend/perception/frame_processor.py
+@@ -49,6 +49,7 @@ class FrameProcessor:
+         self.pose_interval = 3
+         self.last_hand_detections = []
+         self.last_pose_detections = []
++        self.scroll_anchor_y: Optional[float] = None
+ 
+     def update_modalities(self, face: bool, hand: bool, voice: bool) -> None:
+         self.modalities = {"face": face, "hand": hand, "voice": voice}
+@@ -117,19 +118,34 @@ class FrameProcessor:
+         if hand:
+             center = ((hand["bbox"][0] + hand["bbox"][2]) / 2, (hand["bbox"][1] + hand["bbox"][3]) / 2)
+             self.hand_history.append((center[0], center[1], time.time()))
+-            gesture = self._swipe() or self._classify_hand(hand)
++            gesture = self._classify_hand(hand)
+             state, confirmed = self._confirm(gesture)
+             result["hand"] = {"detected": True, "bbox": self._bbox(hand["bbox"]), "keypoints": hand.get("keypoints", []), "gesture": gesture, "confidence": hand.get("confidence", 0.0), "gesture_state": state}
+-            if gesture == "POINT" and hand.get("confidence", 0.0) >= config.gesture_confidence_threshold:
+-                self.engine.move_cursor(*self._screen_from_hand(hand))
++            # FIST drives the cursor. Fingers are curled so fingertip keypoints
++            # are unreliable — use the bounding-box centre instead.
++            if gesture == "FIST" and hand.get("confidence", 0.0) >= config.gesture_confidence_threshold:
++                self.engine.move_cursor(*self._screen_from_bbox(hand["bbox"]))
++            # TWO_FINGERS drives a continuous scroll, like a virtual scroll
++            # wheel, while the gesture is held — not a one-shot event.
++            if gesture == "TWO_FINGERS" and hand.get("confidence", 0.0) >= config.gesture_confidence_threshold:
++                if self.scroll_anchor_y is None:
++                    self.scroll_anchor_y = center[1]
++                else:
++                    dy = center[1] - self.scroll_anchor_y
++                    if abs(dy) >= config.dead_zone:
++                        self.engine.scroll(int(-dy / 4))
++                        self.scroll_anchor_y = center[1]
++            else:
++                self.scroll_anchor_y = None
+             if confirmed:
+                 event_name = self._hand_event(confirmed)
+                 if event_name:
+                     events.append(self._event(event_name, Modality.HAND, hand.get("confidence", 0.0), {"bbox": hand["bbox"]}, active["id"] if active else 0))
+-                    if confirmed == "PINCH":
+-                        self.engine.click(*self._screen_from_hand(hand))
+-                    elif confirmed.startswith("SWIPE_"):
+-                        self.engine.scroll(5 if confirmed in {"SWIPE_UP", "SWIPE_RIGHT"} else -5)
++                    # OPEN_PALM performs the click.
++                    if confirmed == "OPEN_PALM":
++                        self.engine.click(*self._screen_from_bbox(hand["bbox"]))
++        else:
++            self.scroll_anchor_y = None
+ 
+         result["events"] = [event.to_dict() for event in events if self.modalities.get(event.modality.value.lower(), True)]
+         result["active_user_id"] = active["id"] if active else 0
+@@ -183,9 +199,19 @@ class FrameProcessor:
+         width, height = self.engine.adapter.get_screen_size()
+         return int(max(0, min(width, point[0] / 1280 * width))), int(max(0, min(height, point[1] / 720 * height)))
+ 
++    def _screen_from_bbox(self, bbox):
++        """Map a hand bounding-box centre to screen coordinates.
++
++        Used for FIST/OPEN_PALM where fingertip keypoints are unreliable
++        (fingers curled or model didn't return fine keypoints).
++        """
++        center_x, center_y = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
++        width, height = self.engine.adapter.get_screen_size()
++        return int(max(0, min(width, center_x / 1280 * width))), int(max(0, min(height, center_y / 720 * height)))
++
+     def _classify_hand(self, hand):
+         label = hand.get("class_name", "").lower().replace(" ", "_").replace("-", "_")
+-        aliases = {"open_hand": "OPEN_PALM", "palm": "OPEN_PALM", "stop": "OPEN_PALM", "closed_hand": "FIST", "fist": "FIST", "grip": "FIST", "grabbing": "FIST", "point": "POINT", "one": "POINT", "pinch": "PINCH", "thumb_index": "PINCH", "thumb_index2": "PINCH", "thumb_up": "THUMB_UP", "like": "THUMB_UP", "thumb_down": "THUMB_DOWN", "dislike": "THUMB_DOWN"}
++        aliases = {"open_hand": "OPEN_PALM", "palm": "OPEN_PALM", "stop": "OPEN_PALM", "closed_hand": "FIST", "fist": "FIST", "grip": "FIST", "grabbing": "FIST", "point": "POINT", "one": "POINT", "pinch": "PINCH", "thumb_index": "PINCH", "thumb_index2": "PINCH", "thumb_up": "THUMB_UP", "like": "THUMB_UP", "thumb_down": "THUMB_DOWN", "dislike": "THUMB_DOWN", "peace": "TWO_FINGERS", "peace_inverted": "TWO_FINGERS", "two_up": "TWO_FINGERS", "two_up_inverted": "TWO_FINGERS", "victory": "TWO_FINGERS", "v_sign": "TWO_FINGERS", "two": "TWO_FINGERS"}
+         if label in aliases:
+             return aliases[label]
+         points = hand.get("keypoints") or []
+@@ -196,6 +222,8 @@ class FrameProcessor:
+         if math.dist(points[4], points[8]) / palm < 0.28:
+             return "PINCH"
+         extended = [points[tip][1] < points[pip][1] for tip, pip in ((8, 6), (12, 10), (16, 14), (20, 18))]
++        if extended[0] and extended[1] and not extended[2] and not extended[3]:
++            return "TWO_FINGERS"
+         if all(extended):
+             return "OPEN_PALM"
+         if extended[0] and not any(extended[1:]):
+@@ -258,7 +286,7 @@ class FrameProcessor:
+ 
+     @staticmethod
+     def _hand_event(gesture):
+-        return {"OPEN_PALM": "HAND_OPEN", "FIST": "HAND_FIST", "POINT": "HAND_POINT", "PINCH": "HAND_PINCH", "THUMB_UP": "THUMB_UP", "THUMB_DOWN": "THUMB_DOWN", "SWIPE_LEFT": "HAND_SWIPE_LEFT", "SWIPE_RIGHT": "HAND_SWIPE_RIGHT", "SWIPE_UP": "HAND_SWIPE_UP", "SWIPE_DOWN": "HAND_SWIPE_DOWN"}.get(gesture)
++        return {"OPEN_PALM": "HAND_OPEN", "FIST": "HAND_FIST", "POINT": "HAND_POINT", "PINCH": "HAND_PINCH", "TWO_FINGERS": "HAND_TWO_FINGERS", "THUMB_UP": "THUMB_UP", "THUMB_DOWN": "THUMB_DOWN", "SWIPE_LEFT": "HAND_SWIPE_LEFT", "SWIPE_RIGHT": "HAND_SWIPE_RIGHT", "SWIPE_UP": "HAND_SWIPE_UP", "SWIPE_DOWN": "HAND_SWIPE_DOWN"}.get(gesture)
+ 
+     @staticmethod
+     def _event(name, modality, confidence, payload, user_id):
+diff --git a/backend/perception/yolo/yolo_provider.py b/backend/perception/yolo/yolo_provider.py
+index 8527a75..d32c1db 100644
+--- a/backend/perception/yolo/yolo_provider.py
++++ b/backend/perception/yolo/yolo_provider.py
+@@ -4,22 +4,43 @@ try:
+ except ImportError:
+     YOLO = None
+ 
++try:
++    import torch
++except ImportError:
++    torch = None
++
+ try:
+     from backend.perception.yolo.model_manager import YoloModelManager
++    from backend.config import config as _config
+ except ImportError:
+     from .model_manager import YoloModelManager
++    from ...config import config as _config
++
++
++def _resolve_device(requested: str) -> str:
++    """Resolve 'auto'/'cpu'/'cuda' against actual hardware availability."""
++    requested = (requested or "auto").lower()
++    has_cuda = bool(torch is not None and torch.cuda.is_available())
++    if requested == "cuda":
++        return "cuda" if has_cuda else "cpu"
++    if requested == "cpu":
++        return "cpu"
++    return "cuda" if has_cuda else "cpu"  # auto
++
+ 
+ class YoloProvider:
+     def __init__(self, model_name: str = "yolov8n.pt", models_dir: str = "models"):
+         self.manager = YoloModelManager(model_name, models_dir)
+         self.model_path = self.manager.ensure_model()
+         self.model_name = model_name
+-        self.device = "CPU"
++        self.device = _resolve_device(getattr(_config, "device", "auto")).upper()
+         self.loaded = False
+         self.error = None
+         if YOLO is not None and self.model_path:
+             try:
+                 self.model = YOLO(self.model_path)
++                if self.device == "CUDA":
++                    self.model.to("cuda")
+                 self.loaded = True
+             except Exception as exc:
+                 self.model = None
+@@ -27,10 +48,6 @@ class YoloProvider:
+         elif YOLO is not None:
+             self.model = None
+             self.error = f"{model_name} is not cached in the local models directory"
+-            try:
+-                self.device = str(next(self.model.model.parameters()).device).upper()
+-            except Exception:
+-                pass
+         else:
+             self.model = None
+             self.error = "ultralytics is not installed"
+diff --git a/frontend/src/hooks/useWebSocket.ts b/frontend/src/hooks/useWebSocket.ts
+index 3b26bef..e08f418 100644
+--- a/frontend/src/hooks/useWebSocket.ts
++++ b/frontend/src/hooks/useWebSocket.ts
+@@ -19,7 +19,13 @@ export function useWebSocket() {
+   useEffect(() => {
+     const configuredUrl = import.meta.env.VITE_WS_URL;
+     const url = configuredUrl || `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
+-    wsService.onStatusChange(setStatus);
++    wsService.onStatusChange((status) => {
++      setStatus(status);
++      if (status === 'connected') {
++        const { faceEnabled, handEnabled, voiceEnabled } = usePerceptionStore.getState();
++        wsService.sendModalities(faceEnabled, handEnabled, voiceEnabled);
++      }
++    });
+     wsService.onMessage(setConnectionMessage);
+     wsService.onPerception((result) => {
+       updatePerception(result);
+diff --git a/frontend/src/store/perceptionStore.ts b/frontend/src/store/perceptionStore.ts
+index d60a8a2..49aa70a 100644
+--- a/frontend/src/store/perceptionStore.ts
++++ b/frontend/src/store/perceptionStore.ts
+@@ -1,5 +1,6 @@
+ import { create } from 'zustand';
+ import { FaceDetection, HandDetection, CursorPosition, PerceptionResult } from '../types/perception';
++import { wsService } from '../services/PerceptaWSService';
+ 
+ interface PerceptionState {
+   face: FaceDetection | null;
+@@ -46,7 +47,7 @@ export const usePerceptionStore = create<PerceptionState>((set) => ({
+     multiUserDetected: result.multi_user_detected,
+     trackingLocked: result.tracking_locked
+   })),
+-  setFaceEnabled: (enabled) => set((state) => { const next = { ...state, faceEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: enabled, hand: state.handEnabled, voice: state.voiceEnabled })); return next; }),
+-  setHandEnabled: (enabled) => set((state) => { const next = { ...state, handEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: state.faceEnabled, hand: enabled, voice: state.voiceEnabled })); return next; }),
+-  setVoiceEnabled: (enabled) => set((state) => { const next = { ...state, voiceEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: state.faceEnabled, hand: state.handEnabled, voice: enabled })); return next; })
++  setFaceEnabled: (enabled) => set((state) => { const next = { ...state, faceEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: enabled, hand: state.handEnabled, voice: state.voiceEnabled })); wsService.sendModalities(enabled, state.handEnabled, state.voiceEnabled); return next; }),
++  setHandEnabled: (enabled) => set((state) => { const next = { ...state, handEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: state.faceEnabled, hand: enabled, voice: state.voiceEnabled })); wsService.sendModalities(state.faceEnabled, enabled, state.voiceEnabled); return next; }),
++  setVoiceEnabled: (enabled) => set((state) => { const next = { ...state, voiceEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: state.faceEnabled, hand: state.handEnabled, voice: enabled })); wsService.sendModalities(state.faceEnabled, state.handEnabled, enabled); return next; })
+ }));

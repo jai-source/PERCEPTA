@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { FaceDetection, HandDetection, CursorPosition, PerceptionResult } from '../types/perception';
+import { wsService } from '../services/PerceptaWSService';
 
 interface PerceptionState {
   face: FaceDetection | null;
@@ -46,7 +47,7 @@ export const usePerceptionStore = create<PerceptionState>((set) => ({
     multiUserDetected: result.multi_user_detected,
     trackingLocked: result.tracking_locked
   })),
-  setFaceEnabled: (enabled) => set((state) => { const next = { ...state, faceEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: enabled, hand: state.handEnabled, voice: state.voiceEnabled })); return next; }),
-  setHandEnabled: (enabled) => set((state) => { const next = { ...state, handEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: state.faceEnabled, hand: enabled, voice: state.voiceEnabled })); return next; }),
-  setVoiceEnabled: (enabled) => set((state) => { const next = { ...state, voiceEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: state.faceEnabled, hand: state.handEnabled, voice: enabled })); return next; })
+  setFaceEnabled: (enabled) => set((state) => { const next = { ...state, faceEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: enabled, hand: state.handEnabled, voice: state.voiceEnabled })); wsService.sendModalities(enabled, state.handEnabled, state.voiceEnabled); return next; }),
+  setHandEnabled: (enabled) => set((state) => { const next = { ...state, handEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: state.faceEnabled, hand: enabled, voice: state.voiceEnabled })); wsService.sendModalities(state.faceEnabled, enabled, state.voiceEnabled); return next; }),
+  setVoiceEnabled: (enabled) => set((state) => { const next = { ...state, voiceEnabled: enabled }; localStorage.setItem('percepta_modalities', JSON.stringify({ face: state.faceEnabled, hand: state.handEnabled, voice: enabled })); wsService.sendModalities(state.faceEnabled, state.handEnabled, enabled); return next; })
 }));

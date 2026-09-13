@@ -13,9 +13,11 @@ from typing import List
 try:
     from perception.frame_processor import FrameProcessor
     from gestures.voice.voice_processor import VoiceProcessor
+    from config import config
 except ImportError:
     from ..perception.frame_processor import FrameProcessor
     from ..gestures.voice.voice_processor import VoiceProcessor
+    from ..config import config
 
 router = APIRouter()
 
@@ -124,6 +126,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 active_processor.update_modalities(bool(message.get("face_enabled", True)), bool(message.get("hand_enabled", True)), bool(message.get("voice_enabled", True)))
                 await websocket.send_json({"type": "ack", "request": kind})
             elif kind in {"settings", "calibration"}:
-                await websocket.send_json({"type": "ack", "request": kind})
+                if kind == "settings":
+                    applied = {}
+                    for key, value in message.items():
+                        if key == "type":
+                            continue
+                        attr = key.lower()
+                        if hasattr(config, attr) and isinstance(getattr(config, attr), (int, float)):
+                            try:
+                                cast = type(getattr(config, attr))
+                                setattr(config, attr, cast(value))
+                                applied[key] = getattr(config, attr)
+                            except (TypeError, ValueError):
+                                continue
+                    await websocket.send_json({"type": "ack", "request": kind, "applied": applied})
+                else:
+                    await websocket.send_json({"type": "ack", "request": kind})
     except WebSocketDisconnect:
         manager.disconnect(websocket)

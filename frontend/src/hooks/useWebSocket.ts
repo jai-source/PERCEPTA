@@ -19,7 +19,13 @@ export function useWebSocket() {
   useEffect(() => {
     const configuredUrl = import.meta.env.VITE_WS_URL;
     const url = configuredUrl || `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
-    wsService.onStatusChange(setStatus);
+    wsService.onStatusChange((status) => {
+      setStatus(status);
+      if (status === 'connected') {
+        const { faceEnabled, handEnabled, voiceEnabled } = usePerceptionStore.getState();
+        wsService.sendModalities(faceEnabled, handEnabled, voiceEnabled);
+      }
+    });
     wsService.onMessage(setConnectionMessage);
     wsService.onPerception((result) => {
       updatePerception(result);

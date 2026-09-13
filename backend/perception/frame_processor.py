@@ -49,6 +49,7 @@ class FrameProcessor:
         self.pose_interval = 3
         self.last_hand_detections = []
         self.last_pose_detections = []
+        self.scroll_anchor_y: Optional[float] = None
 
     def update_modalities(self, face: bool, hand: bool, voice: bool) -> None:
         self.modalities = {"face": face, "hand": hand, "voice": voice}
@@ -117,19 +118,34 @@ class FrameProcessor:
         if hand:
             center = ((hand["bbox"][0] + hand["bbox"][2]) / 2, (hand["bbox"][1] + hand["bbox"][3]) / 2)
             self.hand_history.append((center[0], center[1], time.time()))
-            gesture = self._swipe() or self._classify_hand(hand)
+            gesture = self._classify_hand(hand)
             state, confirmed = self._confirm(gesture)
             result["hand"] = {"detected": True, "bbox": self._bbox(hand["bbox"]), "keypoints": hand.get("keypoints", []), "gesture": gesture, "confidence": hand.get("confidence", 0.0), "gesture_state": state}
-            if gesture == "POINT" and hand.get("confidence", 0.0) >= config.gesture_confidence_threshold:
-                self.engine.move_cursor(*self._screen_from_hand(hand))
+            # FIST drives the cursor. Fingers are curled so fingertip keypoints
+            # are unreliable — use the bounding-box centre instead.
+            if gesture == "FIST" and hand.get("confidence", 0.0) >= config.gesture_confidence_threshold:
+                self.engine.move_cursor(*self._screen_from_bbox(hand["bbox"]))
+            # TWO_FINGERS drives a continuous scroll, like a virtual scroll
+            # wheel, while the gesture is held — not a one-shot event.
+            if gesture == "TWO_FINGERS" and hand.get("confidence", 0.0) >= config.gesture_confidence_threshold:
+                if self.scroll_anchor_y is None:
+                    self.scroll_anchor_y = center[1]
+                else:
+                    dy = center[1] - self.scroll_anchor_y
+                    if abs(dy) >= config.dead_zone:
+                        self.engine.scroll(int(-dy / 4))
+                        self.scroll_anchor_y = center[1]
+            else:
+                self.scroll_anchor_y = None
             if confirmed:
                 event_name = self._hand_event(confirmed)
                 if event_name:
                     events.append(self._event(event_name, Modality.HAND, hand.get("confidence", 0.0), {"bbox": hand["bbox"]}, active["id"] if active else 0))
-                    if confirmed == "PINCH":
-                        self.engine.click(*self._screen_from_hand(hand))
-                    elif confirmed.startswith("SWIPE_"):
-                        self.engine.scroll(5 if confirmed in {"SWIPE_UP", "SWIPE_RIGHT"} else -5)
+                    # OPEN_PALM performs the click.
+                    if confirmed == "OPEN_PALM":
+                        self.engine.click(*self._screen_from_bbox(hand["bbox"]))
+        else:
+            self.scroll_anchor_y = None
 
         result["events"] = [event.to_dict() for event in events if self.modalities.get(event.modality.value.lower(), True)]
         result["active_user_id"] = active["id"] if active else 0
@@ -183,9 +199,19 @@ class FrameProcessor:
         width, height = self.engine.adapter.get_screen_size()
         return int(max(0, min(width, point[0] / 1280 * width))), int(max(0, min(height, point[1] / 720 * height)))
 
+    def _screen_from_bbox(self, bbox):
+        """Map a hand bounding-box centre to screen coordinates.
+
+        Used for FIST/OPEN_PALM where fingertip keypoints are unreliable
+        (fingers curled or model didn't return fine keypoints).
+        """
+        center_x, center_y = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+        width, height = self.engine.adapter.get_screen_size()
+        return int(max(0, min(width, center_x / 1280 * width))), int(max(0, min(height, center_y / 720 * height)))
+
     def _classify_hand(self, hand):
         label = hand.get("class_name", "").lower().replace(" ", "_").replace("-", "_")
-        aliases = {"open_hand": "OPEN_PALM", "palm": "OPEN_PALM", "stop": "OPEN_PALM", "closed_hand": "FIST", "fist": "FIST", "grip": "FIST", "grabbing": "FIST", "point": "POINT", "one": "POINT", "pinch": "PINCH", "thumb_index": "PINCH", "thumb_index2": "PINCH", "thumb_up": "THUMB_UP", "like": "THUMB_UP", "thumb_down": "THUMB_DOWN", "dislike": "THUMB_DOWN"}
+        aliases = {"open_hand": "OPEN_PALM", "palm": "OPEN_PALM", "stop": "OPEN_PALM", "closed_hand": "FIST", "fist": "FIST", "grip": "FIST", "grabbing": "FIST", "point": "POINT", "one": "POINT", "pinch": "PINCH", "thumb_index": "PINCH", "thumb_index2": "PINCH", "thumb_up": "THUMB_UP", "like": "THUMB_UP", "thumb_down": "THUMB_DOWN", "dislike": "THUMB_DOWN", "peace": "TWO_FINGERS", "peace_inverted": "TWO_FINGERS", "two_up": "TWO_FINGERS", "two_up_inverted": "TWO_FINGERS", "victory": "TWO_FINGERS", "v_sign": "TWO_FINGERS", "two": "TWO_FINGERS"}
         if label in aliases:
             return aliases[label]
         points = hand.get("keypoints") or []
@@ -196,6 +222,8 @@ class FrameProcessor:
         if math.dist(points[4], points[8]) / palm < 0.28:
             return "PINCH"
         extended = [points[tip][1] < points[pip][1] for tip, pip in ((8, 6), (12, 10), (16, 14), (20, 18))]
+        if extended[0] and extended[1] and not extended[2] and not extended[3]:
+            return "TWO_FINGERS"
         if all(extended):
             return "OPEN_PALM"
         if extended[0] and not any(extended[1:]):
@@ -258,7 +286,7 @@ class FrameProcessor:
 
     @staticmethod
     def _hand_event(gesture):
-        return {"OPEN_PALM": "HAND_OPEN", "FIST": "HAND_FIST", "POINT": "HAND_POINT", "PINCH": "HAND_PINCH", "THUMB_UP": "THUMB_UP", "THUMB_DOWN": "THUMB_DOWN", "SWIPE_LEFT": "HAND_SWIPE_LEFT", "SWIPE_RIGHT": "HAND_SWIPE_RIGHT", "SWIPE_UP": "HAND_SWIPE_UP", "SWIPE_DOWN": "HAND_SWIPE_DOWN"}.get(gesture)
+        return {"OPEN_PALM": "HAND_OPEN", "FIST": "HAND_FIST", "POINT": "HAND_POINT", "PINCH": "HAND_PINCH", "TWO_FINGERS": "HAND_TWO_FINGERS", "THUMB_UP": "THUMB_UP", "THUMB_DOWN": "THUMB_DOWN", "SWIPE_LEFT": "HAND_SWIPE_LEFT", "SWIPE_RIGHT": "HAND_SWIPE_RIGHT", "SWIPE_UP": "HAND_SWIPE_UP", "SWIPE_DOWN": "HAND_SWIPE_DOWN"}.get(gesture)
 
     @staticmethod
     def _event(name, modality, confidence, payload, user_id):

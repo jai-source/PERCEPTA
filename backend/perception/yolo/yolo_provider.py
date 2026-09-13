@@ -5,21 +5,42 @@ except ImportError:
     YOLO = None
 
 try:
+    import torch
+except ImportError:
+    torch = None
+
+try:
     from backend.perception.yolo.model_manager import YoloModelManager
+    from backend.config import config as _config
 except ImportError:
     from .model_manager import YoloModelManager
+    from ...config import config as _config
+
+
+def _resolve_device(requested: str) -> str:
+    """Resolve 'auto'/'cpu'/'cuda' against actual hardware availability."""
+    requested = (requested or "auto").lower()
+    has_cuda = bool(torch is not None and torch.cuda.is_available())
+    if requested == "cuda":
+        return "cuda" if has_cuda else "cpu"
+    if requested == "cpu":
+        return "cpu"
+    return "cuda" if has_cuda else "cpu"  # auto
+
 
 class YoloProvider:
     def __init__(self, model_name: str = "yolov8n.pt", models_dir: str = "models"):
         self.manager = YoloModelManager(model_name, models_dir)
         self.model_path = self.manager.ensure_model()
         self.model_name = model_name
-        self.device = "CPU"
+        self.device = _resolve_device(getattr(_config, "device", "auto")).upper()
         self.loaded = False
         self.error = None
         if YOLO is not None and self.model_path:
             try:
                 self.model = YOLO(self.model_path)
+                if self.device == "CUDA":
+                    self.model.to("cuda")
                 self.loaded = True
             except Exception as exc:
                 self.model = None
@@ -27,10 +48,6 @@ class YoloProvider:
         elif YOLO is not None:
             self.model = None
             self.error = f"{model_name} is not cached in the local models directory"
-            try:
-                self.device = str(next(self.model.model.parameters()).device).upper()
-            except Exception:
-                pass
         else:
             self.model = None
             self.error = "ultralytics is not installed"

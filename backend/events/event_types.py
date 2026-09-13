@@ -25,6 +25,7 @@ class EventType(str, Enum):
     HEAD_TILT = "HEAD_TILT"
     HEAD_NOD = "HEAD_NOD"
     HEAD_SHAKE = "HEAD_SHAKE"
+    HAND_TWO_FINGERS = "HAND_TWO_FINGERS"
 
     # Eye / brow
     EYEBROW_RAISE = "EYEBROW_RAISE"
