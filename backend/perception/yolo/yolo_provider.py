@@ -17,10 +17,28 @@ except ImportError:
     from ...config import config as _config
 
 
+# Cache the CUDA availability check — calling torch.cuda.is_available()
+# repeatedly is a known source of multi-second stalls on machines with a
+# mismatched/broken NVIDIA driver.
+_CUDA_AVAILABLE: bool | None = None
+
+
+def _cuda_available() -> bool:
+    """Check CUDA availability exactly once per process, with driver-level
+    exception fallback to CPU."""
+    global _CUDA_AVAILABLE
+    if _CUDA_AVAILABLE is None:
+        try:
+            _CUDA_AVAILABLE = bool(torch is not None and torch.cuda.is_available())
+        except Exception:
+            _CUDA_AVAILABLE = False
+    return _CUDA_AVAILABLE
+
+
 def _resolve_device(requested: str) -> str:
     """Resolve 'auto'/'cpu'/'cuda' against actual hardware availability."""
     requested = (requested or "auto").lower()
-    has_cuda = bool(torch is not None and torch.cuda.is_available())
+    has_cuda = _cuda_available()
     if requested == "cuda":
         return "cuda" if has_cuda else "cpu"
     if requested == "cpu":

@@ -14,12 +14,14 @@ try:
     from events.event_types import EventType, Modality, PerceptualEvent
     from perception.yolo.yolo_provider import YoloProvider
     from interaction.engine import InteractionEngine
+    from perception.face.eyebrow_tracker import EyebrowTracker
 except ImportError:
     from ..config import config
     from ..tracking.user_tracker import UserTracker
     from ..events.event_types import EventType, Modality, PerceptualEvent
     from .yolo.yolo_provider import YoloProvider
     from ..interaction.engine import InteractionEngine
+    from ..perception.face.eyebrow_tracker import EyebrowTracker
 
 
 class FrameProcessor:
@@ -50,6 +52,12 @@ class FrameProcessor:
         self.last_hand_detections = []
         self.last_pose_detections = []
         self.scroll_anchor_y: Optional[float] = None
+        # Eyebrow-raise -> click (MediaPipe FaceLandmarker)
+        self.eyebrow_tracker = EyebrowTracker(model_dir)
+        self._eyebrow_ms_counter = 0
+        self._eyebrow_last_gesture: Optional[str] = None
+        self._eyebrow_frames = 0
+        self._eyebrow_last_time = 0.0
 
     def update_modalities(self, face: bool, hand: bool, voice: bool) -> None:
         self.modalities = {"face": face, "hand": hand, "voice": voice}
@@ -101,8 +109,34 @@ class FrameProcessor:
         events = []
 
         if active:
+            # Eyebrow-raise detection via MediaPipe (gated behind face modality
+            # and the same interval as pose to bound cost).
+            eyebrow_raised = False
+            if self.modalities["face"] and pose_due and self.eyebrow_tracker.loaded:
+                self._eyebrow_ms_counter += 100
+                try:
+                    score, face_found = self.eyebrow_tracker.process(frame, self._eyebrow_ms_counter)
+                except Exception:
+                    score, face_found = 0.0, False
+                if face_found and score >= config.eyebrow_threshold:
+                    eyebrow_raised = self._confirm_face()
+                else:
+                    self._eyebrow_frames = 0
+            if eyebrow_raised:
+                # Eyebrow-raise -> click at the current cursor position
+                cx, cy = getattr(self, "cursor", [0.0, 0.0])
+                events.append(self._event("EYEBROW_RAISE", Modality.FACE, 0.9, {"score": score}, active["id"]))
+                self.engine.click(int(cx), int(cy))
+
             bbox = active["bbox"]
-            center = ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+            # Prefer the pose model's nose keypoint (COCO index 0) as the
+            # tracking anchor — bbox center shifts with shoulder/torso
+            # movement, not just head turn.
+            keypoints = active.get("keypoints") or []
+            if len(keypoints) > 0 and keypoints[0][0] > 0 and keypoints[0][1] > 0:
+                center = (keypoints[0][0], keypoints[0][1])
+            else:
+                center = ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
             dx, dy = self._smooth_head_delta(center)
             movement = self._head_gesture(dx, dy)
             if movement:
@@ -133,7 +167,9 @@ class FrameProcessor:
                 else:
                     dy = center[1] - self.scroll_anchor_y
                     if abs(dy) >= config.dead_zone:
-                        self.engine.scroll(int(-dy / 4))
+                        # Windows only registers a scroll tick at ~±100
+                        # (WHEEL_DELTA=120); smaller values are silently dropped.
+                        self.engine.scroll(-100 if dy > 0 else 100)
                         self.scroll_anchor_y = center[1]
             else:
                 self.scroll_anchor_y = None
@@ -164,8 +200,8 @@ class FrameProcessor:
         result = dict(self.last_result)
         result["events"] = [event.to_dict()]
         x, y = result["cursor"]["x"], result["cursor"]["y"]
-        actions = {EventType.VOICE_CLICK: lambda: self.engine.click(int(x), int(y)), EventType.VOICE_DOUBLE_CLICK: lambda: self.engine.double_click(int(x), int(y)), EventType.VOICE_RIGHT_CLICK: lambda: self.engine.right_click(int(x), int(y)), EventType.VOICE_SCROLL_UP: lambda: self.engine.scroll(5), EventType.VOICE_SCROLL_DOWN: lambda: self.engine.scroll(-5)}
-        actions.update({EventType.VOICE_GO_BACK: lambda: self.engine.key("left"), EventType.VOICE_GO_FORWARD: lambda: self.engine.key("right"), EventType.VOICE_STOP: lambda: None, EventType.VOICE_PAUSE: lambda: None, EventType.VOICE_RESUME: lambda: None})
+        actions = {EventType.VOICE_CLICK: lambda: self.engine.click(int(x), int(y)), EventType.VOICE_DOUBLE_CLICK: lambda: self.engine.double_click(int(x), int(y)), EventType.VOICE_RIGHT_CLICK: lambda: self.engine.right_click(int(x), int(y)), EventType.VOICE_SCROLL_UP: lambda: self.engine.scroll(100), EventType.VOICE_SCROLL_DOWN: lambda: self.engine.scroll(-100)}
+        actions.update({EventType.VOICE_GO_LEFT: lambda: self._nudge_cursor(-60, 0), EventType.VOICE_GO_RIGHT: lambda: self._nudge_cursor(60, 0), EventType.VOICE_GO_UP: lambda: self._nudge_cursor(0, -60), EventType.VOICE_GO_DOWN: lambda: self._nudge_cursor(0, 60), EventType.VOICE_GO_BACK: lambda: self.engine.key("left"), EventType.VOICE_GO_FORWARD: lambda: self.engine.key("right"), EventType.VOICE_STOP: lambda: None, EventType.VOICE_PAUSE: lambda: None, EventType.VOICE_RESUME: lambda: None})
         action = actions.get(event.event_type)
         if action:
             action()
@@ -191,6 +227,30 @@ class FrameProcessor:
         current[0] = max(0, min(width, current[0] + config.k_head * dx))
         current[1] = max(0, min(height, current[1] + config.k_head * dy))
         self.cursor = current
+        return int(current[0]), int(current[1])
+
+    def _confirm_face(self) -> bool:
+        """Dedicated debounce for the eyebrow-raise gesture.
+
+        Separate state from the hand gesture debounce so they don't reset
+        each other. Uses config.click_cooldown as the cooldown.
+        """
+        self._eyebrow_frames += 1
+        if (self._eyebrow_frames >= config.gesture_confirmation_frames
+                and time.time() - self._eyebrow_last_time >= config.click_cooldown):
+            self._eyebrow_last_time = time.time()
+            self._eyebrow_frames = 0
+            return True
+        return False
+
+    def _nudge_cursor(self, dx, dy):
+        """Move the cursor by a fixed step (voice directional commands)."""
+        width, height = self.engine.adapter.get_screen_size()
+        current = getattr(self, "cursor", [width / 2, height / 2])
+        current[0] = max(0, min(width, current[0] + dx))
+        current[1] = max(0, min(height, current[1] + dy))
+        self.cursor = current
+        self.engine.move_cursor(int(current[0]), int(current[1]))
         return int(current[0]), int(current[1])
 
     def _screen_from_hand(self, hand):

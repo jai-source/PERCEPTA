@@ -51,7 +51,7 @@ class PercetpaConfig(BaseSettings):
     smooth_window: int = 5        # Moving average window
 
     # ── Face Gestures ─────────────────────────────────────────────────────────
-    eyebrow_threshold: float = 0.22    # Normalised ratio increase to trigger raise
+    eyebrow_threshold: float = 0.4     # Blendshape score (0-1) for eyebrow raise
     click_cooldown: float = 0.8        # Seconds between gesture-clicks
     blink_threshold: float = 0.21      # EAR below this → blink
     blink_consecutive_frames: int = 3  # Frames below threshold before BLINK fires

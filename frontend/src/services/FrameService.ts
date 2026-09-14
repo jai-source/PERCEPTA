@@ -10,7 +10,7 @@ class FrameService {
   private video: HTMLVideoElement | null = null;
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D | null = null;
-  private intervalId: number | null = null;
+  private worker: Worker | null = null;
   private targetFps: number = 12;
   private maxWidth = 640;
   private maxHeight = 480;
@@ -26,19 +26,26 @@ class FrameService {
   }
 
   public start(onFrame: (frame: CapturedFrame) => void): void {
-    if (this.intervalId !== null) return;
+    if (this.worker !== null) return;
 
     const captureInterval = 1000 / this.targetFps;
-    
-    this.intervalId = window.setInterval(() => {
+
+    // Scheduling lives in a Web Worker so Chrome/Edge don't throttle it to
+    // ~1/sec when the tab is backgrounded. The actual video/canvas drawing
+    // (captureFrame) still runs on the main thread — Workers can't access
+    // DOM elements like <video>/<canvas> directly.
+    this.worker = new Worker(new URL('../workers/ticker.worker.ts', import.meta.url), { type: 'module' });
+    this.worker.onmessage = () => {
       void this.captureFrame().then((frame) => { if (frame) onFrame(frame); });
-    }, captureInterval);
+    };
+    this.worker.postMessage({ type: 'start', intervalMs: captureInterval });
   }
 
   public stop(): void {
-    if (this.intervalId !== null) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+    if (this.worker !== null) {
+      this.worker.postMessage({ type: 'stop' });
+      this.worker.terminate();
+      this.worker = null;
     }
   }
 
