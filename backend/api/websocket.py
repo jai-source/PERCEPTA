@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import time
+import traceback
 from typing import Any, Optional
 
 import cv2
@@ -41,6 +42,7 @@ manager = ConnectionManager()
 processor: Optional[FrameProcessor] = None
 processor_lock = asyncio.Lock()
 TRACE_PIPELINE = os.getenv("PERCEPTA_TRACE_PIPELINE", "true").lower() != "false"
+LOG_EXCEPTIONS = os.getenv("PERCEPTA_LOG_EXCEPTIONS", "true").lower() != "false"
 
 
 def trace(stage: int, frame_id: str, message: str) -> None:
@@ -93,11 +95,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 frame_id, encoded_frame = unpack_binary_frame(packet["bytes"])
                 trace(3, frame_id, "received")
                 trace(4, frame_id, "processing_start")
-                result = await asyncio.to_thread(active_processor.process, decode_frame(encoded_frame))
-                trace(5, frame_id, f"inference_finished inference_ms={result.get('inference_ms', 0):.1f}")
-                result["trace_frame_id"] = frame_id
-                trace(6, frame_id, "event_sent")
-                await websocket.send_json(result)
+                try:
+                    result = await asyncio.to_thread(active_processor.process, decode_frame(encoded_frame))
+                    trace(5, frame_id, f"inference_finished inference_ms={result.get('inference_ms', 0):.1f}")
+                    result["trace_frame_id"] = frame_id
+                    trace(6, frame_id, "event_sent")
+                    await websocket.send_json(result)
+                except WebSocketDisconnect:
+                    raise
+                except Exception as exc:
+                    if LOG_EXCEPTIONS:
+                        traceback.print_exc()
+                    try:
+                        await websocket.send_json({"type": "error", "message": str(exc)})
+                    except Exception:
+                        break
                 continue
             message = json.loads(packet["text"])
             kind = message.get("type")
@@ -114,12 +126,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 except WebSocketDisconnect:
                     raise
                 except Exception as exc:
+                    if LOG_EXCEPTIONS:
+                        traceback.print_exc()
                     try:
                         await websocket.send_json({"type": "error", "message": str(exc)})
                     except Exception:
                         break
             elif kind == "voice":
-                event = VoiceProcessor().process(message.get("transcript", ""), float(message.get("confidence", 0.0)))
+                transcript = message.get("transcript", "")
+                confidence = float(message.get("confidence", 0.0))
+                event = VoiceProcessor().process(transcript, confidence)
+                if event is not None:
+                    print(f"[PERCEPTA_VOICE] transcript={transcript!r} -> {event.event_type.value}", flush=True)
+                elif transcript.strip():
+                    print(f"[PERCEPTA_VOICE] transcript={transcript!r} -> no match", flush=True)
                 if event is not None and active_processor.modalities.get("voice", True):
                     await websocket.send_json(await asyncio.to_thread(active_processor.add_voice_event, event))
             elif kind == "modalities":

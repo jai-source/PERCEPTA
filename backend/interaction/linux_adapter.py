@@ -4,6 +4,7 @@ from .base import InteractionAdapter
 class LinuxAdapter(InteractionAdapter):
     def __init__(self):
         pyautogui.FAILSAFE = False
+        pyautogui.PAUSE = 0.0
 
     def click(self, x: int, y: int) -> bool:
         try:

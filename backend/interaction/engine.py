@@ -5,38 +5,63 @@ from .linux_adapter import LinuxAdapter
 from .macos_adapter import MacOSAdapter
 from .browser_adapter import BrowserAdapter
 
+_SAFE_MARGIN = 5
+
+
 class InteractionEngine:
     def __init__(self, mode: str = "os"):
         self.mode = mode
         self.adapter = self._get_adapter()
+        screen = self.adapter.get_screen_size()
+        print(
+            f"[PERCEPTA] InteractionEngine mode={self.mode!r} adapter={type(self.adapter).__name__} screen={screen[0]}x{screen[1]}",
+            flush=True,
+        )
 
     def _get_adapter(self) -> InteractionAdapter:
-        if self.mode == "browser":
+        mode = (self.mode or "windows").lower()
+        if mode == "browser":
             return BrowserAdapter()
-            
+        if mode == "windows":
+            return WindowsAdapter()
+        if mode == "linux":
+            return LinuxAdapter()
+        if mode in {"macos", "darwin"}:
+            return MacOSAdapter()
+
         system = platform.system().lower()
         if system == "windows":
             return WindowsAdapter()
-        elif system == "linux":
+        if system == "linux":
             return LinuxAdapter()
-        elif system == "darwin":
+        if system == "darwin":
             return MacOSAdapter()
-        else:
-            return WindowsAdapter()
-            
+        return WindowsAdapter()
+
+    def _clamp(self, x: int, y: int) -> tuple[int, int]:
+        width, height = self.adapter.get_screen_size()
+        return (
+            max(_SAFE_MARGIN, min(width - _SAFE_MARGIN, int(x))),
+            max(_SAFE_MARGIN, min(height - _SAFE_MARGIN, int(y))),
+        )
+
     def click(self, x: int, y: int) -> bool:
-        return self.adapter.click(x, y)
+        sx, sy = self._clamp(x, y)
+        return self.adapter.click(sx, sy)
 
     def move_cursor(self, x: int, y: int) -> bool:
-        return self.adapter.move_cursor(x, y)
+        sx, sy = self._clamp(x, y)
+        return self.adapter.move_cursor(sx, sy)
 
     def double_click(self, x: int, y: int) -> bool:
-        return self.adapter.click(x, y) and self.adapter.click(x, y)
+        sx, sy = self._clamp(x, y)
+        return self.adapter.click(sx, sy) and self.adapter.click(sx, sy)
 
     def right_click(self, x: int, y: int) -> bool:
         try:
             import pyautogui
-            pyautogui.rightClick(x=x, y=y)
+            sx, sy = self._clamp(x, y)
+            pyautogui.rightClick(x=sx, y=sy)
             return True
         except Exception:
             return False
