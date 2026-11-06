@@ -5,6 +5,7 @@
   "scripts": {
     "install": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run_percepta.ps1 -InstallOnly",
     "dev": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run_percepta.ps1 -SkipInstall",
-    "build": "npm --prefix frontend run build"
+    "build": "npm --prefix frontend run build",
+    "start": "python agent/main.py"
   }
 }

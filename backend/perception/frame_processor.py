@@ -68,6 +68,9 @@ class FrameProcessor:
         self.slide_swipe_cooldown = 0.9
         self._debug_frame_counter = 0
         self._last_hand_class_log = ""
+        self._unknown_hand_classes: set[str] = set()
+        if not self.eyebrow_tracker.loaded and self.eyebrow_tracker.error:
+            print(f"[PERCEPTA_EYEBROW] unavailable: {self.eyebrow_tracker.error}", flush=True)
 
     def update_modalities(self, face: bool, hand: bool, voice: bool) -> None:
         self.modalities = {"face": face, "hand": hand, "voice": voice}
@@ -152,7 +155,7 @@ class FrameProcessor:
             try:
                 # Eyebrow-raise detection via MediaPipe (gated behind face modality
                 # and the same interval as pose to bound cost).
-                if self.modalities["face"] and pose_due and self.eyebrow_tracker.loaded:
+                if self.modalities["face"] and pose_due and self.frame_number % 2 == 0 and self.eyebrow_tracker.loaded:
                     self._eyebrow_ms_counter += 100
                     try:
                         score, face_found = self.eyebrow_tracker.process(frame, self._eyebrow_ms_counter)
@@ -248,7 +251,7 @@ class FrameProcessor:
                         if abs(dy) >= config.dead_zone:
                             # Windows only registers a scroll tick at ~±100
                             # (WHEEL_DELTA=120); smaller values are silently dropped.
-                            self.engine.scroll(-100 if dy > 0 else 100)
+                            self.engine.scroll(-120 if dy > 0 else 120)
                             self.scroll_anchor_y = center[1]
             else:
                 self.scroll_anchor_y = None
@@ -362,7 +365,8 @@ class FrameProcessor:
         fw = max(self.frame_width, 1)
         fh = max(self.frame_height, 1)
         margin = 5
-        sx = int(max(margin, min(width - margin, frame_x / fw * width)))
+        # Camera input is mirrored; compensate once for hand coordinates.
+        sx = int(max(margin, min(width - margin, (1.0 - frame_x / fw) * width)))
         sy = int(max(margin, min(height - margin, frame_y / fh * height)))
         return sx, sy
 
@@ -371,6 +375,9 @@ class FrameProcessor:
         aliases = {"open_hand": "OPEN_PALM", "palm": "OPEN_PALM", "stop": "OPEN_PALM", "closed_hand": "FIST", "fist": "FIST", "grip": "FIST", "grabbing": "FIST", "point": "POINT", "one": "POINT", "pinch": "PINCH", "thumb_index": "PINCH", "thumb_index2": "PINCH", "thumb_up": "THUMB_UP", "like": "THUMB_UP", "thumb_down": "THUMB_DOWN", "dislike": "THUMB_DOWN", "peace": "TWO_FINGERS", "peace_inverted": "TWO_FINGERS", "two_up": "TWO_FINGERS", "two_up_inverted": "TWO_FINGERS", "victory": "TWO_FINGERS", "v_sign": "TWO_FINGERS", "two": "TWO_FINGERS"}
         if label in aliases:
             return aliases[label]
+        if label not in self._unknown_hand_classes:
+            self._unknown_hand_classes.add(label)
+            print(f"[PERCEPTA_HAND] unknown class_name={label!r}", flush=True)
         points = hand.get("keypoints") or []
         if len(points) < 21:
             return None
@@ -394,6 +401,8 @@ class FrameProcessor:
             return None
         start, end = self.hand_history[0], self.hand_history[-1]
         dx, dy = end[0] - start[0], end[1] - start[1]
+        if end[2] - start[2] > 0.4:
+            return None
         if math.hypot(dx, dy) < config.swipe_min_velocity:
             return None
         if abs(dx) > abs(dy) * 1.3:
@@ -408,6 +417,8 @@ class FrameProcessor:
             return None
         start, end = self.hand_history[0], self.hand_history[-1]
         dx, dy = end[0] - start[0], end[1] - start[1]
+        if end[2] - start[2] > 0.4:
+            return None
         if abs(dx) <= abs(dy) * 1.5:
             return None
         if abs(dx) < config.swipe_min_velocity:

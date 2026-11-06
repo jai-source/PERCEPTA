@@ -1,22 +1,34 @@
-import { RefCallback } from 'react';
+import { useEffect, useState } from 'react';
 import DashboardPanel from '../components/DashboardPanel';
-import { usePerceptionStore } from '../store/perceptionStore';
-import { useEventStore } from '../store/eventStore';
-import { useSystemStore } from '../store/systemStore';
 
-function confidence(value: number) { return `${Math.round(value * 100)}%`; }
-function SensorCard({ name, state, gesture, value, detail, enabled }: { name: string; state: string; gesture: string; value: number; detail: string; enabled: boolean }) {
-  return <article className={`sensor-card ${enabled ? 'enabled' : 'disabled'}`}><div className="sensor-top"><span className="sensor-name">{name}</span><span className="live-tag"><i className={`status-dot ${enabled ? 'active' : 'error'}`} /> {enabled ? state : 'DISABLED'}</span></div><strong className="gesture-state">{enabled ? gesture || 'NO SIGNAL' : 'MODALITY OFF'}</strong><div className="confidence-row"><span>CONFIDENCE</span><span>{enabled ? confidence(value) : '—'}</span></div><div className="confidence-bar"><div className="confidence-fill" style={{ width: `${enabled ? value * 100 : 0}%` }} /></div><small>{enabled ? detail : 'Enable this modality to resume local inference.'}</small></article>;
-}
+type Status = { modes: Record<string, boolean>; fps: number; device: string; errors: string[]; gestures: Record<string, string>; events: Array<{ event_type: string; modality: string; timestamp: number }>; camera_connected?: boolean };
 
-export default function Dashboard({ videoRef }: { videoRef: RefCallback<HTMLVideoElement> }) {
-  const { face, hand, faceEnabled, handEnabled, voiceEnabled, multiUserDetected, trackingLocked } = usePerceptionStore();
-  const enabledModalities: Record<string, boolean> = { FACE: faceEnabled, HAND: handEnabled, VOICE: voiceEnabled };
-  const events = useEventStore((state) => state.events).filter((event) => enabledModalities[event.modality] !== false).slice(-6).reverse();
-  const { wsStatus, handModelLoaded, faceModelLoaded } = useSystemStore();
-  return <div className="page dashboard-page"><div className="page-intro"><div><p className="eyebrow">SESSION / REAL-TIME</p><h2>Perceptual field</h2></div><span className={`connection-pill ${wsStatus}`}>{wsStatus === 'connected' ? '● LIVE INFERENCE' : `● ${wsStatus.toUpperCase()}`}</span></div>
-    <div className="dashboard-grid"><DashboardPanel title="Sensor field" eyebrow="01 / CAMERA INPUT" className="camera-panel"><div className="camera-stage"><video ref={videoRef} muted playsInline /><div className="camera-grid" />{faceEnabled && face?.bbox && <span className="camera-bbox face-bbox" style={{ left: `${face.bbox.x / 6.4}%`, top: `${face.bbox.y / 4.8}%`, width: `${face.bbox.w / 6.4}%`, height: `${face.bbox.h / 4.8}%` }}><b>FACE</b></span>}{handEnabled && hand?.bbox && <span className="camera-bbox hand-bbox" style={{ left: `${hand.bbox.x / 6.4}%`, top: `${hand.bbox.y / 4.8}%`, width: `${hand.bbox.w / 6.4}%`, height: `${hand.bbox.h / 4.8}%` }}><b>HAND</b></span>}<div className="camera-empty">{(faceEnabled && face?.detected) || (handEnabled && hand?.detected) ? 'TRACKING ACTIVE' : 'ALLOW CAMERA TO BEGIN'}<small>Local HUD / enabled modalities only</small></div>{trackingLocked && faceEnabled && <span className="tracking-lock">ACTIVE USER / LOCKED</span>}{multiUserDetected && faceEnabled && <span className="multi-user">MULTIPLE USERS</span>}</div></DashboardPanel>
-      <DashboardPanel title="Modality status" eyebrow="02 / NORMALIZED INPUTS" className="status-panel"><div className="sensor-list"><SensorCard enabled={faceEnabled} name="HEAD + FACE" state={face?.detected ? 'ACTIVE' : 'IDLE'} gesture={face?.gesture || 'WAITING'} value={face?.confidence || 0} detail={face?.head_pose ? `Δ ${face.head_pose.dx.toFixed(1)} / ${face.head_pose.dy.toFixed(1)} · tilt ${face.head_pose.tilt.toFixed(1)}°` : 'No face geometry received'} /><SensorCard enabled={handEnabled} name="HANDS" state={hand?.detected ? 'ACTIVE' : 'IDLE'} gesture={hand?.gesture || 'WAITING'} value={hand?.confidence || 0} detail={hand?.gesture_state || 'Temporal filter standing by'} /><SensorCard enabled={voiceEnabled} name="VOICE" state="BROWSER READY" gesture={events.find((event) => event.modality === 'VOICE')?.event_type || 'LISTENING'} value={events.find((event) => event.modality === 'VOICE')?.confidence || 0} detail="Speech commands normalize into events" /></div></DashboardPanel>
-      <DashboardPanel title="Event stream" eyebrow="03 / EVENT BUS" className="events-panel"><div className="model-status"><span>FACE MODEL <b className={faceModelLoaded ? 'ok' : 'warn'}>{faceModelLoaded ? 'LOADED' : 'FALLBACK / UNAVAILABLE'}</b></span><span>HAND MODEL <b className={handModelLoaded ? 'ok' : 'warn'}>{handModelLoaded ? 'LOADED' : 'NOT AVAILABLE'}</b></span></div><div className="event-list">{events.length ? events.map((event) => <div className="event-row" key={event.id}><time>{event.formatted_time}</time><b>{event.event_type}</b><span>{event.modality}</span><em>{confidence(event.confidence)}</em></div>) : <div className="empty-state">No events yet. Start the camera or speak a command to populate the stream.</div>}</div></DashboardPanel>
-    </div></div>;
+export default function Dashboard() {
+  const [status, setStatus] = useState<Status>({ modes: {}, fps: 0, device: 'unknown', errors: [], gestures: {}, events: [], camera_connected: false });
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  useEffect(() => {
+    const socket = new WebSocket(`ws://${window.location.host}/ws`);
+    socket.onmessage = (event) => { const data = JSON.parse(event.data); if (data.type === 'status') setStatus(data); };
+    const timer = window.setInterval(() => {
+      const url = `/api/preview.jpg?t=${Date.now()}`;
+      fetch(url).then((response) => {
+        if (!response.ok) throw new Error('preview unavailable');
+        setPreviewUrl(url);
+      }).catch(() => setPreviewUrl(null));
+    }, 200);
+    return () => { window.clearInterval(timer); socket.close(); };
+  }, []);
+  const toggle = async (mode: string) => {
+    await fetch('/api/modes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [mode]: !status.modes[mode] }) });
+  };
+  return <div className="page dashboard-page">
+    <div className="page-intro"><div><p className="eyebrow">SESSION / LOCAL AGENT</p><h2>Perceptual field</h2></div><span className="connection-pill connected">● BACKGROUND AGENT</span></div>
+    <div style={{ background: '#19352e', padding: 12, marginBottom: 16 }}>Running in background — works with this window minimized</div>
+    <div className="modality-controls">{['head', 'hand', 'voice'].map((mode) => <button key={mode} className={status.modes[mode] ? 'selected' : ''} onClick={() => toggle(mode)}>{mode.toUpperCase()}</button>)}</div>
+    <div className="dashboard-grid">
+      <DashboardPanel title="Agent status" eyebrow="01 / LOCAL PROCESS"><div className="sensor-list"><p>Device: {status.device}</p><p>Loop FPS: {status.fps}</p><p>Head: {status.gestures.head || 'IDLE'}</p><p>Hand: {status.gestures.hand || 'IDLE'}</p><p>Voice: {status.gestures.voice || 'IDLE'}</p>{status.errors.map((error) => <p key={error} style={{ color: '#ff8b8b' }}>{error}</p>)}</div></DashboardPanel>
+      <DashboardPanel title="Event stream" eyebrow="02 / OS ACTIONS"><div className="event-list">{status.events.slice().reverse().map((event, index) => <div className="event-row" key={`${event.timestamp}-${index}`}><time>{new Date(event.timestamp * 1000).toLocaleTimeString()}</time><b>{event.event_type}</b><span>{event.modality}</span></div>)}</div></DashboardPanel>
+      <DashboardPanel title="Preview" eyebrow="03 / CAMERA"><div style={{ width: 320, maxWidth: '100%' }}><div style={{ marginBottom: 8, color: status.camera_connected ? '#7ee2b8' : '#ffb86b' }}>{status.camera_connected ? '● CAMERA CONNECTED' : '○ CAMERA DISCONNECTED'}</div>{previewUrl ? <img src={previewUrl} alt="Latest local camera preview" style={{ width: 320, maxWidth: '100%' }} /> : <div style={{ width: 320, height: 240, maxWidth: '100%', display: 'grid', placeItems: 'center', background: '#18211f', color: '#9aa9a5' }}>Camera preview unavailable</div>}</div></DashboardPanel>
+    </div>
+  </div>;
 }

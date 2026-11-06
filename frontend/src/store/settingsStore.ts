@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { PercetpaSettings, DEFAULT_SETTINGS } from '../types/settings';
-import { wsService } from '../services/PerceptaWSService';
 
 interface SettingsState {
   settings: PercetpaSettings;
@@ -40,6 +39,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   
   sendToBackend: () => {
     const { settings } = get();
-    wsService.sendSettings(settings);
+    fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
   }
 }));

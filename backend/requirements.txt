@@ -16,3 +16,5 @@ python-dotenv
 screeninfo
 requests
 mediapipe
+vosk
+sounddevice

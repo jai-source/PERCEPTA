@@ -1,11 +1,13 @@
 import platform
+import logging
 from .base import InteractionAdapter
 from .windows_adapter import WindowsAdapter
 from .linux_adapter import LinuxAdapter
 from .macos_adapter import MacOSAdapter
 from .browser_adapter import BrowserAdapter
 
-_SAFE_MARGIN = 5
+_SAFE_MARGIN = 2
+log = logging.getLogger(__name__)
 
 
 class InteractionEngine:
@@ -61,17 +63,19 @@ class InteractionEngine:
         try:
             import pyautogui
             sx, sy = self._clamp(x, y)
-            pyautogui.rightClick(x=sx, y=sy)
+            pyautogui.rightClick(x=sx, y=sy, _pause=False)
             return True
         except Exception:
+            log.exception("right click failed")
             return False
 
     def key(self, key_name: str) -> bool:
         try:
             import pyautogui
-            pyautogui.press(key_name)
+            pyautogui.press(key_name, _pause=False)
             return True
         except Exception:
+            log.exception("key press failed")
             return False
         
     def type_text(self, text: str) -> bool:
